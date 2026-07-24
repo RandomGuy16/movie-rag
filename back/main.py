@@ -2,23 +2,39 @@ from contextlib import asynccontextmanager
 from src.config import *
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 from google import genai
 import json
 import os
+import psycopg
+from pgvector.psycopg import register_vector_async
 from seed import seed_dataset
+from src.seed import get_similar_embeddings, DATABASE_URL
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Runs idempotent database population check on server startup
+    # 1. Runs idempotent database population check on server startup
     try:
         await seed_dataset()
     except Exception as e:
         print(f"⚠️ Seeding check notice: {e}")
-    yield
+
+    # 2. Establish persistent DB connection for RAG vector queries
+    conn = None
+    try:
+        conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
+        await register_vector_async(conn)
+        app.state.db_conn = conn
+        print("Connected to PostgreSQL pgvector database.")
+        yield
+    finally:
+        if conn:
+            await conn.close()
+            print("Database connection closed.")
 
 
 app = FastAPI(
@@ -53,7 +69,7 @@ class ChatRequest(BaseModel):
     repeat_penalty: Optional[float] = Field(None, description="Applies penalty to repeated tokens.")
     stream: bool = Field(False, description="Whether to stream response tokens back dynamically.")
     context: Optional[List[int]] = Field(None, description="Conversation context tokens from previous turns for memory.")
-    previous_interaction_id: Optional[str] = Field(None, description="Conversacion context id from previous turns")
+    previous_interaction_id: Optional[str] = Field(None, description="Interaction context ID from previous turns")
 
 
 @app.get("/info")
@@ -82,8 +98,27 @@ async def get_info():
 
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
-    """Proxies requests using google.genai SDK's Interactions API."""
+async def chat(req: ChatRequest, request: Request):
+    """RAG-enabled chat using pgvector similarity search & google.genai SDK."""
+    # 1. Fetch top N relevant movie context from PostgreSQL pgvector
+    db_conn = request.app.state.db_conn
+    similar_movies = await get_similar_embeddings(db_conn, query_text=req.prompt, limit=3)
+    
+    # 2. Build augmented RAG prompt string
+    context_text = "\n\n".join([
+        f"Title: {m['title']}\nTagline: {m['tagline']}\nGenres: {m['genres']}\nOverview: {m['overview']}"
+        for m in similar_movies
+    ])
+    
+    rag_prompt = f"""You are a movie expert assistant. Use the retrieved TMDB movie information below to answer the user request.
+
+Retrieved Movie Context:
+----------------------------------
+{context_text}
+----------------------------------
+
+User Request: {req.prompt}"""
+
     if req.stream:
         # Define streaming generator to yield GenAI interaction output chunks as NDJSON
         async def event_generator():
@@ -91,7 +126,7 @@ async def chat(req: ChatRequest):
                 with genai.Client(api_key=GEMINI_API_KEY) as client:
                     stream = client.interactions.create(
                         model="gemini-3.5-flash",
-                        input=req.prompt,
+                        input=rag_prompt,
                         stream=True,
                         previous_interaction_id=req.previous_interaction_id
                     )
@@ -122,17 +157,17 @@ async def chat(req: ChatRequest):
             with genai.Client(api_key=GEMINI_API_KEY) as client:
                 interaction = client.interactions.create(
                     model="gemini-3.5-flash",
-                    input=req.prompt,
+                    input=rag_prompt,
                     previous_interaction_id=req.previous_interaction_id
                 )
-                # Returns interaction.output_text along with interaction.id for state tracking
+                # Returns interaction.output_text along with interaction.id and retrieved context
                 return {
                     "interaction_id": interaction.id,
-                    "response": interaction.output_text
+                    "response": interaction.output_text,
+                    "retrieved_movies": [m["title"] for m in similar_movies]
                 }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Gemma API request failed: {str(e)}")
-
 
 
 # Serve Frontend Static Assets

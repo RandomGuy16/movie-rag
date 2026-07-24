@@ -42,6 +42,46 @@ async def init_db(conn):
     await conn.commit()
 
 
+
+async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str, limit: int = 3) -> list[dict]:
+    """Retrieves top N movies closest in vector similarity to query_text using pgvector cosine distance."""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    emb_res = client.models.embed_content(
+        model=EMBEDDING_MODEL,
+        contents=query_text
+    )
+    if hasattr(emb_res, 'embedding') and emb_res.embedding and hasattr(emb_res.embedding, 'values'):
+        query_embedding = emb_res.embedding.values
+    else:
+        query_embedding = emb_res.embeddings[0].values
+
+    async with conn.cursor() as cur:
+        await cur.execute("""
+            SELECT id, title, overview, tagline, genres, vote_average, release_date,
+                   1 - (embedding <=> %s::vector) AS similarity
+            FROM movies
+            ORDER BY embedding <=> %s::vector ASC
+            LIMIT %s;
+        """, (query_embedding, query_embedding, limit))
+        rows = await cur.fetchall()
+
+    results = []
+    for r in rows:
+        results.append({
+            "id": r[0],
+            "title": r[1],
+            "overview": r[2],
+            "tagline": r[3],
+            "genres": r[4],
+            "vote_average": r[5],
+            "release_date": r[6],
+            "similarity": float(r[7])
+        })
+    return results
+
+
+
+
 async def get_existing_count(conn) -> int:
     """Return current number of indexed movies in table."""
     async with conn.cursor() as cur:
