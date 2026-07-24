@@ -1,55 +1,40 @@
-# version: '3.8'
-
 services:
-  # servicio 1: la base de datos
+  # Vector Database: PostgreSQL with pgvector extension
   db:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg16
+    container_name: gemma_rag_db
     restart: always
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=app
+      - POSTGRES_DB=gemma_rag
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d app", "psql -c 'CREATE EXTENSION IF NOT EXISTS vector;'"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gemma_rag"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # FastAPI Backend API + Static Web Frontend
   api:
     build:
       context: ./back
       dockerfile: Dockerfile
+    container_name: gemma_rag_api
     ports:
-      - "8080:8080"
+      - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
-    env_file:
-      - ./back/.env
     environment:
-      - PORT=8080
-    command: sh -c "alembic upgrade head && uv run uvicorn src:app --app-dir src --host 0.0.0.0 --port ${PORT:-8080}"
-
-  # frontend: standalone nextjs
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #     args: 
-  #       - NEXT_PUBLIC_API_BASE_URL=${API_BASE_URL}
-  #   ports:
-  #     - "3000:3000"
-  #   depends_on:
-  #     - pdf-service
-  #   env_file:
-  #     - ./frontend/.env.production
-  #   environment:
-  #     - PORT=3000
-  #   restart: unless-stopped
+      - PORT=8000
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/gemma_rag
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    restart: unless-stopped
 
 volumes:
   postgres_data:

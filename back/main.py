@@ -1,15 +1,32 @@
+from contextlib import asynccontextmanager
 from src.config import *
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
-import httpx
+from google import genai
+import json
+import os
+from seed import seed_dataset
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Runs idempotent database population check on server startup
+    try:
+        await seed_dataset()
+    except Exception as e:
+        print(f"⚠️ Seeding check notice: {e}")
+    yield
+
 
 app = FastAPI(
     title="Gemma RAG",
-    description="A proxy server to interface with local Gemma 2 2B models via Ollama with configurable generation parameters."
+    description="RAG service for TMDB 5000 Movies with Google GenAI & PostgreSQL Vector",
+    lifespan=lifespan
 )
+
 
 # Enable CORS for external/cross-origin frontends if needed
 app.add_middleware(
@@ -19,6 +36,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Determine web assets directory path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "../web"))
 
 
 class ChatRequest(BaseModel):
@@ -31,94 +53,108 @@ class ChatRequest(BaseModel):
     repeat_penalty: Optional[float] = Field(None, description="Applies penalty to repeated tokens.")
     stream: bool = Field(False, description="Whether to stream response tokens back dynamically.")
     context: Optional[List[int]] = Field(None, description="Conversation context tokens from previous turns for memory.")
+    previous_interaction_id: Optional[str] = Field(None, description="Conversacion context id from previous turns")
 
 
 @app.get("/info")
 async def get_info():
-    """Returns runtime configuration and verifies connectivity to the local Ollama instance."""
-    ollama_status = "unknown"
+    """Returns runtime configuration and verifies connectivity to the Google GenAI API."""
+    genai_status = "unknown"
     available_models = []
     
-    # contact the model
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{OLLAMA_HOST}/api/tags")
-            if resp.status_code == 200:
-                ollama_status = "connected"
-                data = resp.json()
-                # list available models
-                available_models = [m["name"] for m in data.get("models", [])]
-            else:
-                ollama_status = f"error: status code {resp.status_code}"
+        with genai.Client(api_key=GEMINI_API_KEY) as client:
+            # Query models available in Google GenAI API
+            models_page = client.models.list()
+            available_models = [m.name for m in models_page]
+            genai_status = "connected"
     except Exception as e:
-        ollama_status = f"unreachable: {str(e)}"
+        genai_status = f"unreachable or authentication error: {str(e)}"
         
     return {
         "status": "ok",
-        "ollama_host": OLLAMA_HOST,
-        "ollama_status": ollama_status,
-        "configured_model": MODEL,
-        "available_models": available_models,
+        "backend_sdk": "google-genai",
+        "genai_status": genai_status,
+        "default_model": "gemini-3.5-flash",
+        "available_models": available_models[:10], # top 10 models sample
         "api_docs": "/docs"
     }
 
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    """
-    Proxies requests to local Ollama.
-    Supports generation parameters configuration and streaming responses.
-    """
-    # Build options dictionary for Ollama API
-    options = {}
-    if req.temperature is not None:
-        options["temperature"] = req.temperature
-    if req.top_p is not None:
-        options["top_p"] = req.top_p
-    if req.top_k is not None:
-        options["top_k"] = req.top_k
-    if req.num_predict is not None:
-        options["num_predict"] = req.num_predict
-    if req.repeat_penalty is not None:
-        options["repeat_penalty"] = req.repeat_penalty
-
-    # Construct the payload
-    payload = {
-        "model": MODEL,
-        "prompt": req.prompt,
-        "stream": req.stream,
-    }
-    
-    if req.system:
-        payload["system"] = req.system
-    if req.context:
-        payload["context"] = req.context
-    if options:
-        payload["options"] = options
-
+    """Proxies requests using google.genai SDK's Interactions API."""
     if req.stream:
-        # Define streaming generator to yield Ollama output chunks
+        # Define streaming generator to yield GenAI interaction output chunks as NDJSON
         async def event_generator():
             try:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    async with client.stream("POST", OLLAMA_URL, json=payload) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if line:
-                                yield f"{line}\n"
+                with genai.Client(api_key=GEMINI_API_KEY) as client:
+                    stream = client.interactions.create(
+                        model="gemini-3.5-flash",
+                        input=req.prompt,
+                        stream=True,
+                        previous_interaction_id=req.previous_interaction_id
+                    )
+                    for event in stream:
+                        interaction_id = None
+                        if hasattr(event, 'interaction') and event.interaction:
+                            interaction_id = getattr(event.interaction, 'id', None)
+
+                        delta_text = None
+                        if hasattr(event, 'delta') and event.delta and hasattr(event.delta, 'text'):
+                            delta_text = event.delta.text
+
+                        if delta_text or interaction_id:
+                            chunk_payload = {}
+                            if delta_text:
+                                chunk_payload["response"] = delta_text
+                            if interaction_id:
+                                chunk_payload["interaction_id"] = interaction_id
+                            yield f"{json.dumps(chunk_payload)}\n"
             except Exception as e:
                 yield f"{{\"error\": \"Streaming failed: {str(e)}\"}}\n"
 
         return StreamingResponse(event_generator(), media_type="application/x-ndjson")
     
     else:
-        # Standard synchronous API request
+        # Synchronous GenAI Interaction request
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                response = await client.post(OLLAMA_URL, json=payload)
-                response.raise_for_status()
-                return response.json()
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=500, detail=f"Ollama API request failed: {str(e)}")
+            with genai.Client(api_key=GEMINI_API_KEY) as client:
+                interaction = client.interactions.create(
+                    model="gemini-3.5-flash",
+                    input=req.prompt,
+                    previous_interaction_id=req.previous_interaction_id
+                )
+                # Returns interaction.output_text along with interaction.id for state tracking
+                return {
+                    "interaction_id": interaction.id,
+                    "response": interaction.output_text
+                }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Gemma API request failed: {str(e)}")
 
 
+
+# Serve Frontend Static Assets
+@app.get("/")
+async def serve_index():
+    index_path = os.path.join(WEB_DIR, "index.html")
+    if not os.path.exists(index_path):
+        return {"error": "index.html not found. Make sure the web folder is populated."}
+    return FileResponse(index_path)
+
+
+@app.get("/style.css")
+async def serve_css():
+    css_path = os.path.join(WEB_DIR, "style.css")
+    if not os.path.exists(css_path):
+        raise HTTPException(status_code=404, detail="style.css not found")
+    return FileResponse(css_path)
+
+
+@app.get("/app.js")
+async def serve_js():
+    js_path = os.path.join(WEB_DIR, "app.js")
+    if not os.path.exists(js_path):
+        raise HTTPException(status_code=404, detail="app.js not found")
+    return FileResponse(js_path)

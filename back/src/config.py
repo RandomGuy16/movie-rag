@@ -1,12 +1,24 @@
-import os
+import dotenv
+from pathlib import Path
 
-# Configuration via Environment Variables
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_URL = f"{OLLAMA_HOST}/api/generate"
-MODEL = os.getenv("OLLAMA_MODEL", "gemma2:2b")
+# package dir
+PACKAGE_DIR = Path(__file__).resolve()
 
-# Determine web assets directory path
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "../web"))
+# this function finds the project root
+def find_project_root(start: Path) -> Path:
+    """Walk up until we find pyproject.toml"""
+    for p in (start, *start.parents):
+        if (p / "pyproject.toml").exists() or (p / "requirements.txt").exists():
+            return p
+    return start
+
+PROJECT_ROOT = find_project_root(PACKAGE_DIR)
+SRC_DIR = PROJECT_ROOT / "src"
+DOTENV_PATH = PROJECT_ROOT / ".env"
+
+dotenv.load_dotenv(DOTENV_PATH)
+
+
+GEMINI_API_KEY = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="GEMINI_API_KEY")
 
 

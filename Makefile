@@ -1,27 +1,25 @@
-.PHONY: help dev test build clean db-up db-down docker-dev
+.PHONY: help run sync seed build db-up db-down db-prune docker-dev
 
 help:
-	@printf "  make build  Clean and build the project\n"
-	@printf "  make clean  Remove build outputs\n"
-	@printf "  make db-up  Start PostgreSQL in Docker\n"
-	@printf "  make db-down Stop PostgreSQL in Docker\n"
-	@printf "  make db-prune   Stop PostgreSQL and remove its Docker volume\n"
-	@printf "  make docker-dev Start the API and PostgreSQL with Docker Compose\n"
+	@printf "  make run        Run local FastAPI backend server\n"
+	@printf "  make sync       Sync dependencies using uv\n"
+	@printf "  make seed       Populate PostgreSQL database with TMDB dataset (idempotent)\n"
+	@printf "  make db-up      Start PostgreSQL (pgvector) in Docker\n"
+	@printf "  make db-down    Stop Docker Compose containers\n"
+	@printf "  make db-prune   Stop Docker Compose containers and remove volumes\n"
+	@printf "  make docker-dev Start full API and PostgreSQL stack with Docker Compose\n"
 
-dev: db-up
-	JWT_SECRET=$(JWT_SECRET) $(GRADLEW) bootRun -t
+run:
+	cd back && uv run uvicorn main:app --reload --port 8000
 
-test: db-up
-	JWT_SECRET=$(JWT_SECRET) $(GRADLEW) test
+sync:
+	cd back && uv sync
 
-build:
-	cd back && rm -rf .venv && uv sync
-
-clean:
-	$(GRADLEW) clean
+seed:
+	cd back && uv run python seed.py
 
 db-up:
-	docker compose up -d postgres
+	docker compose up -d db
 
 db-down:
 	docker compose down
