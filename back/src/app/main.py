@@ -1,10 +1,6 @@
 from contextlib import asynccontextmanager
-from app.core.config import *
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
-from google import genai
-import json
 import os
 import psycopg
 from pgvector.psycopg import register_vector_async

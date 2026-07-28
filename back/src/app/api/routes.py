@@ -4,9 +4,12 @@ from fastapi import APIRouter, Depends, status, HTTPException
 from google import genai
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
+from fastapi.responses import FileResponse
 
+from app.api.deps import get_rag_service
 from app.core.config import GEMINI_API_KEY
 from app.domain.models import ChatRequest
+from app.domain.services import RAGService
 from app.seed import get_similar_embeddings
 
 router = APIRouter(prefix="/", tags=["info"])
@@ -38,7 +41,7 @@ async def get_info():
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest, request: Request):
+async def chat(req: ChatRequest, rag_service: RAGService = Depends(get_rag_service)):
     """RAG-enabled chat using pgvector similarity search & google.genai SDK."""
     # Selected model (defaults to gemini-3.5-flash if unspecified)
     selected_model = req.model if req.model else "gemini-3.5-flash"
@@ -117,10 +120,10 @@ User Request: {req.prompt}"""
 # Serve Frontend Static Assets
 @router.get("/")
 async def serve_index():
-    index_path = os.path.join(WEB_DIR, "index.html")
-    if not os.path.exists(index_path):
-        return {"error": "index.html not found. Make sure the web folder is populated."}
-    return FileResponse(index_path)
+    try:
+        return FileResponse(index_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"index.html not found.: {str(e)}")
 
 
 @router.get("/style.css")
