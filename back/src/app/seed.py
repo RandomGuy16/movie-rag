@@ -5,21 +5,25 @@ import asyncio
 from pathlib import Path
 import psycopg
 from pgvector.psycopg import register_vector_async
-from google import genai
+import httpx
 import dotenv
-from config import DOTENV_PATH
+from app.core.config import DOTENV_PATH, PROJECT_ROOT
 
 # Load environment variables
-dotenv.load_dotenv()
+if os.path.exists(DOTENV_PATH):
+    dotenv.load_dotenv(DOTENV_PATH)
+else:
+    dotenv.load_dotenv()
 
-DATABASE_URL = dotenv.get_key(DOTENV_PATH, "DATABASE_URL") or os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/gemma_rag")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-EMBEDDING_MODEL = "text-embedding-004"
-EMBEDDING_DIM = 768
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/gemma_rag")
+HUGGING_FACE_API_KEY = os.getenv("HUGGING_FACE_API_KEY")
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_DIM = 384
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}/pipeline/feature-extraction"
 
 # Find dataset file
 BASE_DIR = Path(__file__).resolve().parent
-DATASET_PATH = BASE_DIR / "../../data-extraction/raw/tmdb_5000_movies.csv"
+DATASET_PATH = PROJECT_ROOT / "raw/tmdb_5000_movies.csv"
 
 
 async def init_db(conn):
@@ -42,18 +46,13 @@ async def init_db(conn):
     await conn.commit()
 
 
-
 async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str, limit: int = 3) -> list[dict]:
     """Retrieves top N movies closest in vector similarity to query_text using pgvector cosine distance."""
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    emb_res = client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=query_text
-    )
-    if hasattr(emb_res, 'embedding') and emb_res.embedding and hasattr(emb_res.embedding, 'values'):
-        query_embedding = emb_res.embedding.values
-    else:
-        query_embedding = emb_res.embeddings[0].values
+    headers = {"Authorization": f"Bearer {HUGGING_FACE_API_KEY}"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(HF_API_URL, headers=headers, json={"inputs": query_text})
+        resp.raise_for_status()
+        query_embedding = resp.json()
 
     async with conn.cursor() as cur:
         await cur.execute("""
@@ -80,8 +79,6 @@ async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str,
     return results
 
 
-
-
 async def get_existing_count(conn) -> int:
     """Return current number of indexed movies in table."""
     async with conn.cursor() as cur:
@@ -90,13 +87,13 @@ async def get_existing_count(conn) -> int:
         return row[0] if row else 0
 
 
-def generate_embeddings_batch(client: genai.Client, texts: list[str]) -> list[list[float]]:
-    """Generates embedding vectors for a batch of text strings via Google GenAI SDK."""
-    response = client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=texts
-    )
-    return [e.values for e in response.embeddings]
+def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
+    """Generates embedding vectors for a batch of text strings via Hugging Face Inference API."""
+    headers = {"Authorization": f"Bearer {HUGGING_FACE_API_KEY}"}
+    resp = httpx.post(HF_API_URL, headers=headers, json={"inputs": texts}, timeout=60.0)
+    resp.raise_for_status()
+    return resp.json()
+
 
 
 async def seed_dataset():
@@ -138,7 +135,7 @@ async def seed_dataset():
                 release_date = row.get("release_date", "").strip()
                 
                 # Combine fields into rich semantic text snippet for embedding
-                text_to_embed = f"Title: {title}. Tagline: {tagline}. Overview: {overview}. Genres: {genres}. Keywords: {keywords}."
+                text_to_embed = f"The movie '{title}' is a {genres} film. {tagline} Here is the overview: {overview} Some key themes and keywords associated with this movie are: {keywords}."
                 
                 movies_to_insert.append({
                     "id": movie_id,
@@ -152,9 +149,8 @@ async def seed_dataset():
                     "text_to_embed": text_to_embed
                 })
 
-        print(f"Total movies parsed: {len(movies_to_insert)}. Generating embeddings in batches...")
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        batch_size = 50
+        print(f"Total movies parsed: {len(movies_to_insert)}. Generating embeddings via Hugging Face Inference API...")
+        batch_size = 32
         inserted_total = 0
         
         for i in range(0, len(movies_to_insert), batch_size):
@@ -162,11 +158,12 @@ async def seed_dataset():
             texts = [m["text_to_embed"] for m in batch]
             
             try:
-                embeddings = generate_embeddings_batch(client, texts)
+                embeddings = generate_embeddings_batch(texts)
             except Exception as e:
                 print(f"⚠️ Error generating embeddings for batch {i}: {e}. Retrying after short pause...")
                 await asyncio.sleep(2)
-                embeddings = generate_embeddings_batch(client, texts)
+                embeddings = generate_embeddings_batch(texts)
+
                 
             rows = [
                 (

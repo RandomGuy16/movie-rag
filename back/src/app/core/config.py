@@ -18,7 +18,6 @@ DOTENV_PATH = PROJECT_ROOT / ".env"
 
 dotenv.load_dotenv(DOTENV_PATH)
 
-
 GEMINI_API_KEY = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="GEMINI_API_KEY")
 
 

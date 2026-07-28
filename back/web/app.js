@@ -143,7 +143,8 @@ async function checkBackendInfo() {
 // Compile payload based on current settings
 function getRequestPayload(promptText = "") {
     const payload = {
-        prompt: promptText || userPromptInput.value || "Explain quantum computing in simple terms.",
+        prompt: promptText || userPromptInput.value || "Recommend a good sci-fi movie.",
+        model: configuredModelName || "gemini-3.5-flash",
         stream: paramStream.checked
     };
     
@@ -153,6 +154,7 @@ function getRequestPayload(promptText = "") {
     
     return payload;
 }
+
 
 // Refreshes API payload preview block
 function updateApiInspector() {

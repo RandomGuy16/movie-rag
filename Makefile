@@ -10,7 +10,7 @@ help:
 	@printf "  make docker-dev Start full API and PostgreSQL stack with Docker Compose\n"
 
 run:
-	cd back && uv run uvicorn main:app --reload --port 8000
+	cd back && uv run uvicorn app.main:app --app-dir src --reload --port 8000
 
 sync:
 	cd back && uv sync

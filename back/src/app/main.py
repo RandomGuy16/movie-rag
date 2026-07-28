@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
-from src.config import *
-from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException
+from app.core.config import *
+from typing import Optional, List
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
@@ -11,8 +10,7 @@ import json
 import os
 import psycopg
 from pgvector.psycopg import register_vector_async
-from seed import seed_dataset
-from src.seed import get_similar_embeddings, DATABASE_URL
+from app.seed import seed_dataset, get_similar_embeddings, DATABASE_URL
 
 
 @asynccontextmanager
@@ -27,6 +25,9 @@ async def lifespan(app: FastAPI):
     conn = None
     try:
         conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
+        async with conn.cursor() as cur:
+            await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        await conn.commit()
         await register_vector_async(conn)
         app.state.db_conn = conn
         print("Connected to PostgreSQL pgvector database.")
@@ -56,11 +57,12 @@ app.add_middleware(
 
 # Determine web assets directory path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "../web"))
+WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "web"))
 
 
 class ChatRequest(BaseModel):
     prompt: str = Field(..., description="The main text prompt for the model.")
+    model: Optional[str] = Field("gemini-3.5-flash", description="Target GenAI model identifier to use.")
     system: Optional[str] = Field(None, description="System message to define the model's behavior/role.")
     temperature: Optional[float] = Field(None, description="Controls response creativity. Higher means more random.")
     top_p: Optional[float] = Field(None, description="Nucleus sampling limit. 1.0 means consider all tokens.")
@@ -100,6 +102,9 @@ async def get_info():
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     """RAG-enabled chat using pgvector similarity search & google.genai SDK."""
+    # Selected model (defaults to gemini-3.5-flash if unspecified)
+    selected_model = req.model if req.model else "gemini-3.5-flash"
+
     # 1. Fetch top N relevant movie context from PostgreSQL pgvector
     db_conn = request.app.state.db_conn
     similar_movies = await get_similar_embeddings(db_conn, query_text=req.prompt, limit=3)
@@ -125,7 +130,7 @@ User Request: {req.prompt}"""
             try:
                 with genai.Client(api_key=GEMINI_API_KEY) as client:
                     stream = client.interactions.create(
-                        model="gemini-3.5-flash",
+                        model=selected_model,
                         input=rag_prompt,
                         stream=True,
                         previous_interaction_id=req.previous_interaction_id
@@ -156,18 +161,20 @@ User Request: {req.prompt}"""
         try:
             with genai.Client(api_key=GEMINI_API_KEY) as client:
                 interaction = client.interactions.create(
-                    model="gemini-3.5-flash",
+                    model=selected_model,
                     input=rag_prompt,
                     previous_interaction_id=req.previous_interaction_id
                 )
                 # Returns interaction.output_text along with interaction.id and retrieved context
                 return {
                     "interaction_id": interaction.id,
+                    "model": selected_model,
                     "response": interaction.output_text,
                     "retrieved_movies": [m["title"] for m in similar_movies]
                 }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Gemma API request failed: {str(e)}")
+
 
 
 # Serve Frontend Static Assets
