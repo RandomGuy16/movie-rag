@@ -1,12 +1,12 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os
 import psycopg
 from pgvector.psycopg import register_vector_async
-
-from app.domain.models import ChatRequest
-from app.seed import seed_dataset, get_similar_embeddings, DATABASE_URL
+from app.seed import seed_dataset, DATABASE_URL
+from app.domain.services import RAGService, StaticFileService
+from app.core.config import GEMINI_API_KEY, WEB_DIR
+from app.api.routes import router
 
 
 @asynccontextmanager
@@ -26,20 +26,23 @@ async def lifespan(app: FastAPI):
         await conn.commit()
         await register_vector_async(conn)
         app.state.db_conn = conn
-        print("Connected to PostgreSQL pgvector database.")
+
+        # Attach static file service to app state so routes can depend on it
+        app.state.static_service = StaticFileService(WEB_DIR)
+        app.state.rag_service = RAGService(db_conn=conn, gemini_api_key=GEMINI_API_KEY)
+        print("Connected to PostgreSQL pgvector database and RAGService + StaticFileService initialized.")
         yield
     finally:
         if conn:
             await conn.close()
             print("Database connection closed.")
 
-
 app = FastAPI(
     title="Gemma RAG",
     description="RAG service for TMDB 5000 Movies with Google GenAI & PostgreSQL Vector",
     lifespan=lifespan
 )
-
+app.include_router(router)
 
 # Enable CORS for external/cross-origin frontends if needed
 app.add_middleware(
@@ -49,9 +52,3 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# Determine web assets directory path
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WEB_DIR = os.path.abspath(os.path.join(BASE_DIR, "web"))
-

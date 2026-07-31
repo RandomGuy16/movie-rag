@@ -1,18 +1,14 @@
-import json
-
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from google import genai
-from starlette.requests import Request
 from starlette.responses import StreamingResponse
 from fastapi.responses import FileResponse
 
-from app.api.deps import get_rag_service
+from app.api.deps import get_rag_service, get_static_service
 from app.core.config import GEMINI_API_KEY
 from app.domain.models import ChatRequest
-from app.domain.services import RAGService
-from app.seed import get_similar_embeddings
+from app.domain.services import RAGService, StaticFileService
 
-router = APIRouter(prefix="/", tags=["info"])
+router = APIRouter(prefix="", tags=["info"])
 
 
 @router.get("/info")
@@ -42,101 +38,48 @@ async def get_info():
 
 @router.post("/chat")
 async def chat(req: ChatRequest, rag_service: RAGService = Depends(get_rag_service)):
-    """RAG-enabled chat using pgvector similarity search & google.genai SDK."""
-    # Selected model (defaults to gemini-3.5-flash if unspecified)
-    selected_model = req.model if req.model else "gemini-3.5-flash"
+    """RAG-enabled chat using pgvector similarity search & google.genai SDK.
 
-    # 1. Fetch top N relevant movie context from PostgreSQL pgvector
-    db_conn = request.app.state.db_conn
-    similar_movies = await get_similar_embeddings(db_conn, query_text=req.prompt, limit=3)
-
-    # 2. Build augmented RAG prompt string
-    context_text = "\n\n".join([
-        f"Title: {m['title']}\nTagline: {m['tagline']}\nGenres: {m['genres']}\nOverview: {m['overview']}"
-        for m in similar_movies
-    ])
-
-    rag_prompt = f"""You are a movie expert assistant. Use the retrieved TMDB movie information below to answer the user request.
-
-Retrieved Movie Context:
-----------------------------------
-{context_text}
-----------------------------------
-
-User Request: {req.prompt}"""
-
-    if req.stream:
-        # Define streaming generator to yield GenAI interaction output chunks as NDJSON
-        async def event_generator():
-            try:
-                with genai.Client(api_key=GEMINI_API_KEY) as client:
-                    stream = client.interactions.create(
-                        model=selected_model,
-                        input=rag_prompt,
-                        stream=True,
-                        previous_interaction_id=req.previous_interaction_id
-                    )
-                    for event in stream:
-                        interaction_id = None
-                        if hasattr(event, 'interaction') and event.interaction:
-                            interaction_id = getattr(event.interaction, 'id', None)
-
-                        delta_text = None
-                        if hasattr(event, 'delta') and event.delta and hasattr(event.delta, 'text'):
-                            delta_text = event.delta.text
-
-                        if delta_text or interaction_id:
-                            chunk_payload = {}
-                            if delta_text:
-                                chunk_payload["response"] = delta_text
-                            if interaction_id:
-                                chunk_payload["interaction_id"] = interaction_id
-                            yield f"{json.dumps(chunk_payload)}\n"
-            except Exception as e:
-                yield f"{{\"error\": \"Streaming failed: {str(e)}\"}}\n"
-
-        return StreamingResponse(event_generator(), media_type="application/x-ndjson")
-
-    else:
-        # Synchronous GenAI Interaction request
-        try:
-            with genai.Client(api_key=GEMINI_API_KEY) as client:
-                interaction = client.interactions.create(
-                    model=selected_model,
-                    input=rag_prompt,
-                    previous_interaction_id=req.previous_interaction_id
-                )
-                # Returns interaction.output_text along with interaction.id and retrieved context
-                return {
-                    "interaction_id": interaction.id,
-                    "model": selected_model,
-                    "response": interaction.output_text,
-                    "retrieved_movies": [m["title"] for m in similar_movies]
-                }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Gemma API request failed: {str(e)}")
+    Delegates retrieval and model interaction to RAGService. Streaming requests return an NDJSON
+    streaming response; non-streaming return the full interaction payload.
+    """
+    try:
+        if req.stream:
+            gen = await rag_service.query_model_stream(req)
+            return StreamingResponse(gen, media_type="application/x-ndjson")
+        else:
+            result = await rag_service.query_model(req)
+            return result
+    except RuntimeError as e:
+        # Errors raised by the service are translated to 500 responses here
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
 
 
 # Serve Frontend Static Assets
 @router.get("/")
-async def serve_index():
+async def serve_index(static_service: StaticFileService = Depends(get_static_service)):
     try:
+        index_path = static_service.serve_index()
         return FileResponse(index_path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"index.html not found.: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/style.css")
-async def serve_css():
-    css_path = os.path.join(WEB_DIR, "style.css")
-    if not os.path.exists(css_path):
-        raise HTTPException(status_code=404, detail="style.css not found")
-    return FileResponse(css_path)
+async def serve_css(static_service: StaticFileService = Depends(get_static_service)):
+    try:
+        css_path = static_service.serve_css()
+        return FileResponse(css_path)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/app.js")
-async def serve_js():
-    js_path = os.path.join(WEB_DIR, "app.js")
-    if not os.path.exists(js_path):
-        raise HTTPException(status_code=404, detail="app.js not found")
-    return FileResponse(js_path)
+async def serve_js(static_service: StaticFileService = Depends(get_static_service)):
+    try:
+        js_path = static_service.serve_js()
+        return FileResponse(js_path)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))

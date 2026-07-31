@@ -7,7 +7,7 @@ import psycopg
 from pgvector.psycopg import register_vector_async
 import httpx
 import dotenv
-from app.core.config import DOTENV_PATH, PROJECT_ROOT
+from app.core.config import DOTENV_PATH, PROJECT_ROOT, HUGGING_FACE_API_KEY
 
 # Load environment variables
 if os.path.exists(DOTENV_PATH):
@@ -16,7 +16,6 @@ else:
     dotenv.load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/gemma_rag")
-HUGGING_FACE_API_KEY = os.getenv("HUGGING_FACE_API_KEY")
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}/pipeline/feature-extraction"
@@ -56,7 +55,7 @@ async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str,
 
     async with conn.cursor() as cur:
         await cur.execute("""
-            SELECT id, title, overview, tagline, genres, vote_average, release_date,
+            SELECT id, title, overview, tagline, genres, keywords, vote_average, release_date,
                    1 - (embedding <=> %s::vector) AS similarity
             FROM movies
             ORDER BY embedding <=> %s::vector ASC
@@ -66,15 +65,17 @@ async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str,
 
     results = []
     for r in rows:
+        # SELECT order: id, title, overview, tagline, genres, keywords, vote_average, release_date, similarity
         results.append({
             "id": r[0],
             "title": r[1],
             "overview": r[2],
             "tagline": r[3],
             "genres": r[4],
-            "vote_average": r[5],
-            "release_date": r[6],
-            "similarity": float(r[7])
+            "keywords": r[5],
+            "vote_average": r[6],
+            "release_date": r[7],
+            "similarity": float(r[8])
         })
     return results
 
