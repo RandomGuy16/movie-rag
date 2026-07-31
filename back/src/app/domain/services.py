@@ -1,7 +1,6 @@
 import os
 import json
 from typing import Iterator
-
 from app.domain.models import ChatRequest
 from google import genai
 from app.seed import get_similar_embeddings
@@ -9,6 +8,7 @@ from app.core.config import GEMINI_API_KEY
 
 
 class StaticFileService:
+    """Service responsible for serving the page static files"""
     def __init__(self, web_dir: str):
         self._web_dir = web_dir
 
