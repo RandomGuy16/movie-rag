@@ -1,8 +1,9 @@
-.PHONY: help run sync seed build db-up db-down db-prune docker-dev
+.PHONY: help run sync fetch seed build db-up db-down db-prune docker-dev
 
 help:
 	@printf "  make run        Run local FastAPI backend server\n"
 	@printf "  make sync       Sync dependencies using uv\n"
+	@printf "  make fetch      Download TMDB 5000 movies CSV from Kaggle into back/raw/\n"
 	@printf "  make seed       Populate PostgreSQL database with TMDB dataset (idempotent)\n"
 	@printf "  make db-up      Start PostgreSQL (pgvector) in Docker\n"
 	@printf "  make db-down    Stop Docker Compose containers\n"
@@ -14,6 +15,9 @@ run: db-up
 
 sync:
 	cd back && uv sync
+
+fetch:
+	cd back && PYTHONPATH=src uv run python -m app.scripts.fetch_dataset
 
 seed:
 	cd back && PYTHONPATH=src uv run python -m app.scripts.seed
