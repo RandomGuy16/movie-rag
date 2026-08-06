@@ -1,0 +1,3 @@
+/home/aroon/Projects/learning/movie-rag/AGENTS.md
+/home/aroon/Projects/learning/movie-rag/back/web/index.html
+/home/aroon/Projects/learning/movie-rag/docker-compose.yml
