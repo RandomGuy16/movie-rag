@@ -9,14 +9,14 @@ help:
 	@printf "  make db-prune   Stop Docker Compose containers and remove volumes\n"
 	@printf "  make docker-dev Start full API and PostgreSQL stack with Docker Compose\n"
 
-run:
+run: db-up
 	cd back && uv run uvicorn app.main:app --app-dir src --reload --port 8000
 
 sync:
 	cd back && uv sync
 
 seed:
-	cd back && uv run python seed.py
+	cd back && PYTHONPATH=src uv run python -m app.scripts.seed
 
 db-up:
 	docker compose up -d db

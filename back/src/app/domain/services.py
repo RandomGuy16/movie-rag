@@ -1,36 +1,30 @@
-import os
 import json
 from typing import Iterator, Callable
-from app.domain.models import ChatRequest
+
 from google import genai
 
-from app.domain.uow import UnitOfWork
+from app.api.schemas import ChatRequest
 from app.core.config import GEMINI_API_KEY
-from app.domain.embeddings import EmbeddingClient, HuggingFaceEmbeddingClient
+from app.domain.uow import UnitOfWork
+from app.infra.embeddings import EmbeddingClient, HuggingFaceEmbeddingClient
 
 
-class StaticFileService:
-    """Service responsible for serving the page static files"""
-    def __init__(self, web_dir: str):
-        self._web_dir = web_dir
+def _build_rag_system_prompt(similar_movies: list) -> str:
+    context_text = "\n\n".join([
+        f"The movie '{m['title']}' is a {m['genres']} film. {m['tagline']} "
+        f"Here is the overview: {m['overview']} "
+        f"Some key themes and keywords associated with this movie are: {m['keywords']}."
+        for m in similar_movies
+    ])
 
-    def serve_index(self) -> str:
-        index_path = os.path.join(self._web_dir, "index.html")
-        if not os.path.exists(index_path):
-            raise Exception(f"{index_path} does not exist")
-        return index_path
-
-    def serve_css(self) -> str:
-        css_path = os.path.join(self._web_dir, "style.css")
-        if not os.path.exists(css_path):
-            raise Exception(f"{css_path} does not exist")
-        return css_path
-
-    def serve_js(self) -> str:
-        js_path = os.path.join(self._web_dir, "app.js")
-        if not os.path.exists(js_path):
-            raise Exception(f"{js_path} does not exist")
-        return js_path
+    return (
+        "You are a movie expert assistant. Use the retrieved TMDB movie information "
+        "below to answer the user request.\n\n"
+        "Retrieved Movie Context:\n"
+        "----------------------------------\n"
+        f"{context_text}\n"
+        "----------------------------------\n\n"
+    )
 
 
 class RAGService:
@@ -57,28 +51,10 @@ class RAGService:
         self.default_model = default_model
 
     async def _fetch_similar(self, prompt: str, limit: int = 3):
-        # generate the embedding for the prompt
         query_embedding = await self.embedding_client.embed_text(prompt)
 
-        # pick similar embeddings to that embedding
         async with self.uow_factory() as uow:
             return await uow.movies.get_by_similarity_embedding(query_embedding, limit=limit)
-
-    def _build_rag_system_prompt(self, similar_movies: list) -> str:
-        # The movie '{title}' is a {genres} film. {tagline} Here is the overview: {overview} Some key themes and keywords associated with this movie are: {keywords}.
-        context_text = "\n\n".join([
-            #f"Title: {m['title']}\nTagline: {m.get('tagline','')}\nGenres: {m.get('genres','')}\nOverview: {m.get('overview','')}"
-            f"The movie '{m['title']}' is a {m['genres']} film. {m['tagline']} Here is the overview: {m['overview']} Some key themes and keywords associated with this movie are: {m['keywords']}."
-            for m in similar_movies
-        ])
-
-        return (
-            "You are a movie expert assistant. Use the retrieved TMDB movie information below to answer the user request.\n\n"
-            "Retrieved Movie Context:\n"
-            "----------------------------------\n"
-            f"{context_text}\n"
-            "----------------------------------\n\n"
-        )
 
     def _selected_model(self, req: ChatRequest) -> str:
         return req.model if req.model else self.default_model
@@ -87,7 +63,7 @@ class RAGService:
         """Synchronous (non-streaming) GenAI interaction returning full response."""
         selected_model = self._selected_model(req)
         similar_movies = await self._fetch_similar(req.prompt, limit=3)
-        system_prompt = self._build_rag_system_prompt(similar_movies)
+        system_prompt = _build_rag_system_prompt(similar_movies)
 
         try:
             with genai.Client(api_key=self.gemini_api_key) as client:
@@ -116,7 +92,7 @@ class RAGService:
         """
         selected_model = self._selected_model(req)
         similar_movies = await self._fetch_similar(req.prompt, limit=3)
-        rag_prompt = self._build_rag_system_prompt(similar_movies)
+        rag_prompt = _build_rag_system_prompt(similar_movies)
 
         def _event_generator() -> Iterator[str]:
             try:

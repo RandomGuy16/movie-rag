@@ -3,33 +3,35 @@ import sys
 import csv
 import asyncio
 from pathlib import Path
+
 import psycopg
 from pgvector.psycopg import register_vector_async
 import httpx
-import dotenv
-from app.core.config import DOTENV_PATH, PROJECT_ROOT, HUGGING_FACE_API_KEY
 
-# Load environment variables
+from app.core.config import (
+    DATABASE_URL,
+    DOTENV_PATH,
+    HUGGING_FACE_API_KEY,
+    HUGGING_FACE_API_URL,
+    PROJECT_ROOT,
+)
+
+
+# ``seed.py`` is a CLI script that may be invoked without the FastAPI
+# app having loaded ``app.core.config``. Re-loading ``.env`` here keeps
+# the script runnable in isolation (``uv run python -m app.scripts.seed``).
 if os.path.exists(DOTENV_PATH):
+    import dotenv
     dotenv.load_dotenv(DOTENV_PATH)
-else:
-    dotenv.load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/gemma_rag")
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
-HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}/pipeline/feature-extraction"
-
-# Find dataset file
-BASE_DIR = Path(__file__).resolve().parent
-DATASET_PATH = PROJECT_ROOT / "raw/tmdb_5000_movies.csv"
+DATASET_PATH = PROJECT_ROOT / "raw" / "tmdb_5000_movies.csv"
 
 
-async def init_db(conn):
+async def init_db(conn: psycopg.AsyncConnection) -> None:
     """Ensure vector extension and target schema table exist."""
     async with conn.cursor() as cur:
         await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-        await cur.execute(f"""
+        await cur.execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id INT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -39,7 +41,7 @@ async def init_db(conn):
                 tagline TEXT,
                 vote_average FLOAT,
                 release_date TEXT,
-                embedding VECTOR({EMBEDDING_DIM})
+                embedding VECTOR(384)
             );
         """)
     await conn.commit()
@@ -49,7 +51,7 @@ async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str,
     """Retrieves top N movies closest in vector similarity to query_text using pgvector cosine distance."""
     headers = {"Authorization": f"Bearer {HUGGING_FACE_API_KEY}"}
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(HF_API_URL, headers=headers, json={"inputs": query_text})
+        resp = await client.post(HUGGING_FACE_API_URL, headers=headers, json={"inputs": query_text})
         resp.raise_for_status()
         query_embedding = resp.json()
 
@@ -75,12 +77,12 @@ async def get_similar_embeddings(conn: psycopg.AsyncConnection, query_text: str,
             "keywords": r[5],
             "vote_average": r[6],
             "release_date": r[7],
-            "similarity": float(r[8])
+            "similarity": float(r[8]),
         })
     return results
 
 
-async def get_existing_count(conn) -> int:
+async def get_existing_count(conn: psycopg.AsyncConnection) -> int:
     """Return current number of indexed movies in table."""
     async with conn.cursor() as cur:
         await cur.execute("SELECT COUNT(*) FROM movies;")
@@ -89,35 +91,33 @@ async def get_existing_count(conn) -> int:
 
 
 def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Generates embedding vectors for a batch of text strings via Hugging Face Inference API."""
+    """Generate embedding vectors for a batch of text strings via Hugging Face Inference API."""
     headers = {"Authorization": f"Bearer {HUGGING_FACE_API_KEY}"}
-    resp = httpx.post(HF_API_URL, headers=headers, json={"inputs": texts}, timeout=60.0)
+    resp = httpx.post(HUGGING_FACE_API_URL, headers=headers, json={"inputs": texts}, timeout=60.0)
     resp.raise_for_status()
     return resp.json()
 
 
-
-async def seed_dataset():
-    """Reads dataset, checks for existing data, embeds, and loads into PostgreSQL asynchronously."""
+async def seed_dataset() -> None:
+    """Read dataset, idempotency-check, embed, and load into PostgreSQL asynchronously."""
     print("Connecting to database...")
     async with await psycopg.AsyncConnection.connect(DATABASE_URL) as conn:
         await register_vector_async(conn)
         await init_db(conn)
-        
-        # Idempotency Check
+
         count = await get_existing_count(conn)
         if count > 0:
-            print(f"✅ Database is already populated with {count} movies. Skipping seeding.")
+            print(f"Database is already populated with {count} movies. Skipping seeding.")
             return
 
         resolved_dataset_path = DATASET_PATH.resolve()
         if not resolved_dataset_path.exists():
-            print(f"❌ Error: Dataset file not found at {resolved_dataset_path}")
+            print(f"Error: Dataset file not found at {resolved_dataset_path}")
             sys.exit(1)
 
         print(f"Reading movies dataset from {resolved_dataset_path}...")
         movies_to_insert = []
-        
+
         with open(resolved_dataset_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -127,17 +127,20 @@ async def seed_dataset():
                 genres = row.get("genres", "").strip()
                 keywords = row.get("keywords", "").strip()
                 tagline = row.get("tagline", "").strip()
-                
+
                 try:
                     vote_avg = float(row["vote_average"]) if row.get("vote_average") else 0.0
                 except ValueError:
                     vote_avg = 0.0
-                    
+
                 release_date = row.get("release_date", "").strip()
-                
-                # Combine fields into rich semantic text snippet for embedding
-                text_to_embed = f"The movie '{title}' is a {genres} film. {tagline} Here is the overview: {overview} Some key themes and keywords associated with this movie are: {keywords}."
-                
+
+                text_to_embed = (
+                    f"The movie '{title}' is a {genres} film. "
+                    f"{tagline} Here is the overview: {overview} "
+                    f"Some key themes and keywords associated with this movie are: {keywords}."
+                )
+
                 movies_to_insert.append({
                     "id": movie_id,
                     "title": title,
@@ -147,25 +150,24 @@ async def seed_dataset():
                     "tagline": tagline,
                     "vote_average": vote_avg,
                     "release_date": release_date,
-                    "text_to_embed": text_to_embed
+                    "text_to_embed": text_to_embed,
                 })
 
         print(f"Total movies parsed: {len(movies_to_insert)}. Generating embeddings via Hugging Face Inference API...")
         batch_size = 32
         inserted_total = 0
-        
+
         for i in range(0, len(movies_to_insert), batch_size):
             batch = movies_to_insert[i : i + batch_size]
             texts = [m["text_to_embed"] for m in batch]
-            
+
             try:
                 embeddings = generate_embeddings_batch(texts)
             except Exception as e:
-                print(f"⚠️ Error generating embeddings for batch {i}: {e}. Retrying after short pause...")
+                print(f"Error generating embeddings for batch {i}: {e}. Retrying after short pause...")
                 await asyncio.sleep(2)
                 embeddings = generate_embeddings_batch(texts)
 
-                
             rows = [
                 (
                     m["id"],
@@ -176,11 +178,11 @@ async def seed_dataset():
                     m["tagline"],
                     m["vote_average"],
                     m["release_date"],
-                    emb
+                    emb,
                 )
                 for m, emb in zip(batch, embeddings)
             ]
-            
+
             async with conn.cursor() as cur:
                 await cur.executemany("""
                     INSERT INTO movies (id, title, overview, genres, keywords, tagline, vote_average, release_date, embedding)
@@ -188,19 +190,19 @@ async def seed_dataset():
                     ON CONFLICT (id) DO NOTHING;
                 """, rows)
             await conn.commit()
-            
+
             inserted_total += len(batch)
             print(f"Progress: {inserted_total}/{len(movies_to_insert)} movies indexed...")
 
         print("Building HNSW vector cosine similarity index...")
         async with conn.cursor() as cur:
             await cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_movies_embedding_hnsw 
-                ON movies 
+                CREATE INDEX IF NOT EXISTS idx_movies_embedding_hnsw
+                ON movies
                 USING hnsw (embedding vector_cosine_ops);
             """)
         await conn.commit()
-        print("🎉 Database seeding complete!")
+        print("Database seeding complete!")
 
 
 if __name__ == "__main__":

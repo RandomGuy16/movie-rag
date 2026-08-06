@@ -4,9 +4,10 @@ from starlette.responses import StreamingResponse
 from fastapi.responses import FileResponse
 
 from app.api.deps import get_rag_service, get_static_service
+from app.api.schemas import ChatRequest
 from app.core.config import GEMINI_API_KEY
-from app.domain.models import ChatRequest
-from app.domain.services import RAGService, StaticFileService
+from app.domain.services import RAGService
+from app.infra.web import StaticFileService
 
 router = APIRouter(prefix="", tags=["info"])
 
@@ -19,7 +20,6 @@ async def get_info():
 
     try:
         with genai.Client(api_key=GEMINI_API_KEY) as client:
-            # Query models available in Google GenAI API
             models_page = client.models.list()
             available_models = [m.name for m in models_page]
             genai_status = "connected"
@@ -31,8 +31,8 @@ async def get_info():
         "backend_sdk": "google-genai",
         "genai_status": genai_status,
         "default_model": "gemini-3.5-flash",
-        "available_models": available_models[:10],  # top 10 models sample
-        "api_docs": "/docs"
+        "available_models": available_models[:10],
+        "api_docs": "/docs",
     }
 
 
@@ -51,13 +51,11 @@ async def chat(req: ChatRequest, rag_service: RAGService = Depends(get_rag_servi
             result = await rag_service.query_model(req)
             return result
     except RuntimeError as e:
-        # Errors raised by the service are translated to 500 responses here
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
 
 
-# Serve Frontend Static Assets
 @router.get("/")
 async def serve_index(static_service: StaticFileService = Depends(get_static_service)):
     try:
