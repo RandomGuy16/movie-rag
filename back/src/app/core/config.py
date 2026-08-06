@@ -24,5 +24,4 @@ dotenv.load_dotenv(DOTENV_PATH)
 
 GEMINI_API_KEY = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="GEMINI_API_KEY")
 HUGGING_FACE_API_KEY = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="HUGGING_FACE_API_KEY")
-
-
+DATABASE_URL = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="DATABASE_URL")
