@@ -25,3 +25,6 @@ dotenv.load_dotenv(DOTENV_PATH)
 GEMINI_API_KEY = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="GEMINI_API_KEY")
 HUGGING_FACE_API_KEY = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="HUGGING_FACE_API_KEY")
 DATABASE_URL = dotenv.get_key(dotenv_path=DOTENV_PATH, key_to_get="DATABASE_URL")
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_DIM = 384
+HUGGING_FACE_API_URL = f"https://router.huggingface.co/hf-inference/models/{EMBEDDING_MODEL}/pipeline/feature-extraction"

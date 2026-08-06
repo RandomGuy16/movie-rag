@@ -1,10 +1,12 @@
 import os
 import json
-from typing import Iterator
+from typing import Iterator, Callable
 from app.domain.models import ChatRequest
 from google import genai
-from app.seed import get_similar_embeddings
+
+from app.domain.uow import UnitOfWork
 from app.core.config import GEMINI_API_KEY
+from app.domain.embeddings import EmbeddingClient, HuggingFaceEmbeddingClient
 
 
 class StaticFileService:
@@ -35,23 +37,34 @@ class RAGService:
     """Service responsible for performing retrieval-augmented generation calls.
 
     Responsibilities:
-    - Fetch similar documents from pgvector via get_similar_embeddings
+    - Fetch similar documents from pgvector via an embedding client + repository
     - Build the RAG prompt
     - Execute synchronous or streaming GenAI interactions
 
     The FastAPI dependency should construct this with a live DB connection (see app.api.deps).
     """
 
-    def __init__(self, db_conn, gemini_api_key: str = GEMINI_API_KEY, default_model: str = "gemini-3.5-flash"):
-        self.conn = db_conn
+    def __init__(
+        self,
+        uow_factory: Callable[[], UnitOfWork],
+        embedding_client: EmbeddingClient | None = None,
+        gemini_api_key: str = GEMINI_API_KEY,
+        default_model: str = "gemini-3.5-flash",
+    ):
+        self.uow_factory = uow_factory
+        self.embedding_client = embedding_client or HuggingFaceEmbeddingClient()
         self.gemini_api_key = gemini_api_key
         self.default_model = default_model
 
     async def _fetch_similar(self, prompt: str, limit: int = 3):
-        # get_similar_embeddings is implemented in app.seed and is async
-        return await get_similar_embeddings(self.conn, query_text=prompt, limit=limit)
+        # generate the embedding for the prompt
+        query_embedding = await self.embedding_client.embed_text(prompt)
 
-    def _build_rag_prompt(self, similar_movies: list) -> str:
+        # pick similar embeddings to that embedding
+        async with self.uow_factory() as uow:
+            return await uow.movies.get_by_similarity_embedding(query_embedding, limit=limit)
+
+    def _build_rag_system_prompt(self, similar_movies: list) -> str:
         # The movie '{title}' is a {genres} film. {tagline} Here is the overview: {overview} Some key themes and keywords associated with this movie are: {keywords}.
         context_text = "\n\n".join([
             #f"Title: {m['title']}\nTagline: {m.get('tagline','')}\nGenres: {m.get('genres','')}\nOverview: {m.get('overview','')}"
@@ -74,7 +87,7 @@ class RAGService:
         """Synchronous (non-streaming) GenAI interaction returning full response."""
         selected_model = self._selected_model(req)
         similar_movies = await self._fetch_similar(req.prompt, limit=3)
-        system_prompt = self._build_rag_prompt(similar_movies)
+        system_prompt = self._build_rag_system_prompt(similar_movies)
 
         try:
             with genai.Client(api_key=self.gemini_api_key) as client:
@@ -82,15 +95,15 @@ class RAGService:
                     model=selected_model,
                     input=req.prompt,
                     previous_interaction_id=req.previous_interaction_id,
-                    system_instruction=system_prompt
+                    system_instruction=system_prompt,
                 )
-
                 return {
                     "interaction_id": getattr(interaction, "id", None),
                     "model": selected_model,
                     "response": getattr(interaction, "output_text", None),
                     "retrieved_movies": [m["title"] for m in similar_movies],
                 }
+
         except Exception as e:
             # Let caller handle HTTP translation; raise for visibility in logs/tests
             raise RuntimeError(f"Gemma API request failed: {e}")
@@ -103,7 +116,7 @@ class RAGService:
         """
         selected_model = self._selected_model(req)
         similar_movies = await self._fetch_similar(req.prompt, limit=3)
-        rag_prompt = self._build_rag_prompt(similar_movies)
+        rag_prompt = self._build_rag_system_prompt(similar_movies)
 
         def _event_generator() -> Iterator[str]:
             try:

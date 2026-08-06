@@ -6,6 +6,7 @@ from pgvector.psycopg import register_vector_async
 
 from app.domain.db import SessionLocal, engine
 from app.domain.uow import UnitOfWork
+from app.domain.embeddings import HuggingFaceEmbeddingClient
 from app.seed import seed_dataset, DATABASE_URL
 from app.domain.services import RAGService, StaticFileService
 from app.core.config import GEMINI_API_KEY, WEB_DIR
@@ -15,6 +16,7 @@ from app.api.routes import router
 
 def uow_factory() -> UnitOfWork:
     return UnitOfWork(SessionLocal)
+
 
 @asynccontextmanager
 async def lifespan(app_: FastAPI):
@@ -41,7 +43,11 @@ async def lifespan(app_: FastAPI):
 
         # Attach static file service to app state so routes can depend on it
         app_.state.static_service = StaticFileService(WEB_DIR)
-        app_.state.rag_service = RAGService(db_conn=conn, gemini_api_key=GEMINI_API_KEY)
+        app_.state.rag_service = RAGService(
+            uow_factory=uow_factory,
+            embedding_client=HuggingFaceEmbeddingClient(),
+            gemini_api_key=GEMINI_API_KEY,
+        )
         print("Connected to PostgreSQL pgvector database and RAGService + StaticFileService initialized.")
         yield
     finally:
