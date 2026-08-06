@@ -3,14 +3,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import psycopg
 from pgvector.psycopg import register_vector_async
+
+from app.domain.db import SessionLocal, engine
+from app.domain.uow import UnitOfWork
 from app.seed import seed_dataset, DATABASE_URL
 from app.domain.services import RAGService, StaticFileService
 from app.core.config import GEMINI_API_KEY, WEB_DIR
+from app.core.logger import logger
 from app.api.routes import router
 
 
+def uow_factory() -> UnitOfWork:
+    return UnitOfWork(SessionLocal)
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app_: FastAPI):
     # 1. Runs idempotent database population check on server startup
     try:
         await seed_dataset()
@@ -19,17 +26,22 @@ async def lifespan(app: FastAPI):
 
     # 2. Establish persistent DB connection for RAG vector queries
     conn = None
+
+    # idk why this line, maybe just a test
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda _: None)
+
     try:
         conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
         async with conn.cursor() as cur:
             await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         await conn.commit()
         await register_vector_async(conn)
-        app.state.db_conn = conn
+        app_.state.db_conn = conn
 
         # Attach static file service to app state so routes can depend on it
-        app.state.static_service = StaticFileService(WEB_DIR)
-        app.state.rag_service = RAGService(db_conn=conn, gemini_api_key=GEMINI_API_KEY)
+        app_.state.static_service = StaticFileService(WEB_DIR)
+        app_.state.rag_service = RAGService(db_conn=conn, gemini_api_key=GEMINI_API_KEY)
         print("Connected to PostgreSQL pgvector database and RAGService + StaticFileService initialized.")
         yield
     finally:

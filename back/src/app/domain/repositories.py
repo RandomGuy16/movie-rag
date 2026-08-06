@@ -1,5 +1,5 @@
 from typing import Protocol
-from sqlalchemy import select, cast, Numeric, literal_column
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.models import ORMMovie
@@ -7,7 +7,7 @@ from app.domain.models import ORMMovie
 
 class MoviesRepository(Protocol):
     """Protocol for movies repository."""
-    def get_by_similarity_embedding(self, embedding: list, limit: int = 3) -> list[dict]:
+    async def get_by_similarity_embedding(self, embedding: list, limit: int = 3) -> list[dict]:
         """Retrieves top N movies closest in vector similarity to the given embedding using pgvector cosine distance."""
         ...
 
@@ -18,7 +18,7 @@ class SqlMoviesRepository(MoviesRepository):
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    def get_by_similarity_embedding(self, embedding: list, limit: int = 3) -> list[dict]:
+    async def get_by_similarity_embedding(self, embedding: list, limit: int = 3) -> list[dict]:
         """Retrieves top N movies closest in vector similarity to the given embedding using pgvector cosine distance."""
         similarity = 1 - (ORMMovie.embedding.cosine_distance(embedding))
         
@@ -38,7 +38,8 @@ class SqlMoviesRepository(MoviesRepository):
             .limit(limit)
         )
         
-        rows = self.session.execute(query).fetchall()
+        result = await self.session.execute(query)
+        rows = result.fetchall()
         
         results = []
         for r in rows:
