@@ -84,5 +84,5 @@ that gets sent to `POST /chat`.
   `POSTGRES_USER` / `POSTGRES_PASSWORD` (and the matching `DATABASE_URL`) before deploying
   anywhere reachable.
 - The API service uses `host.docker.internal` to reach a local Ollama (`OLLAMA_HOST` env var).
-  Change this for production.
+  Change this accordingly.
 - pgvector assumes the `vector` extension is available; the lifespan hook creates it if not.
